@@ -1,0 +1,21 @@
+# Sensitive config (contains email credentials)
+config.py
+
+# Portfolio
+portfolio.txt
+
+# Reports
+reports/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
