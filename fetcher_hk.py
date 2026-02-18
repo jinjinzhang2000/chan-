@@ -113,6 +113,8 @@ def _infer_direction(reason_code: str, shares_text: str) -> str:
     return "权益变动"
 
 
+_hkex_session = requests.Session()
+
 def _fetch_hkex_di_page(start_date: str, end_date: str,
                         page: int = 1) -> tuple:
     """
@@ -131,14 +133,36 @@ def _fetch_hkex_di_page(start_date: str, end_date: str,
     if page > 1:
         params["pg"] = str(page)
 
+    # 尝试访问搜索入口以获取必要Cookie和设置
+    if not _hkex_session.cookies:
+        try:
+            # 增加更多浏览器头信息
+            _hkex_session.headers.update({
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+                "Cache-Control": "max-age=0",
+                "Connection": "keep-alive",
+            })
+            main_url = HKEX_DI_BASE_URL.replace("NSAllFormList.aspx", "NSSrchMethod.aspx")
+            _hkex_session.get(main_url, headers=HK_HEADERS, timeout=15)
+            # 模拟点击 "Search by relevant event date only"
+            date_url = HKEX_DI_BASE_URL.replace("NSAllFormList.aspx", "NSSrchDate.aspx?lang=EN")
+            _hkex_session.get(date_url, headers=HK_HEADERS, timeout=15)
+        except:
+            pass
+
+    # 添加 Referer
+    current_headers = HK_HEADERS.copy()
+    current_headers["Referer"] = HKEX_DI_BASE_URL.replace("NSAllFormList.aspx", "NSSrchDate.aspx")
+
     for retry in range(HK_MAX_RETRIES):
         try:
-            resp = requests.get(HKEX_DI_BASE_URL, params=params,
-                                headers=HK_HEADERS, timeout=30)
+            resp = _hkex_session.get(HKEX_DI_BASE_URL, params=params,
+                                     headers=current_headers, timeout=30)
             resp.raise_for_status()
 
-            if "temporarily unavailable" in resp.text:
-                print(f"  [警告] HKEX页面暂时不可用，重试 {retry + 1}/{HK_MAX_RETRIES}")
+            if "temporarily unavailable" in resp.text or "lblRecCount" not in resp.text:
+                print(f"  [警告] HKEX页面暂时不可用或返回异常，重试 {retry + 1}/{HK_MAX_RETRIES}")
                 time.sleep(2 ** retry)
                 continue
 

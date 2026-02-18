@@ -5,10 +5,12 @@
 1. K线合并 (Inclusive Candle Merging)
 2. 分型识别 (Fractal/Fenxing Detection) - 顶分型/底分型
 3. 笔划分 (Stroke/Bi Identification)
-4. 线段划分 (Segment/XianDuan Identification)
-5. 中枢识别 (Hub/ZhongShu Detection)
-6. 背驰检测 (Divergence/BeiChi Detection)
-7. 买卖点判断 (Buy/Sell Point Detection)
+4. 中枢识别 (Hub/ZhongShu Detection) - 基于笔构建
+5. 背驰检测 (Divergence/BeiChi Detection)
+6. 买卖点判断 (Buy/Sell Point Detection)
+
+TODO:
+- 线段划分 (Segment/XianDuan Identification): 当前直接基于笔构建中枢，后续可增加线段层级以提高稳定性。
 """
 
 import numpy as np
