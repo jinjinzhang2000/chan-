@@ -30,8 +30,8 @@ REASON_CODE_MAP = {
     "15015": "获得/处置淡仓",
 }
 
-_STOCK_CODE_RE = re.compile(r"(?:sc|stock[_-]?code)=(\d{4,5})", re.I)
-_STOCK_PAREN_RE = re.compile(r"\((\d{4,5})\)")
+_STOCK_CODE_RE = re.compile(r"(?:sc|stock[_-]?code)=(\d{1,5})", re.I)
+_STOCK_PAREN_RE = re.compile(r"\((\d{1,5})\)")
 _hkex_session = requests.Session()
 _hkex_session.headers.update(HK_HEADERS)
 _warmed = False

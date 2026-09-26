@@ -457,10 +457,11 @@ def _beichi_for_pair(last_bi, prev_same_dir, df_with_macd, zhongshu_list):
     if not is_area_beichi:
         return None
 
-    # 有中枢间隔且DIF回抽零轴 → 趋势背驰；否则盘整背驰
-    is_trend = dif_crossed_zero or zs_between
+    # 趋势背驰以DIF回抽零轴为准；中枢间隔只作为描述补充
+    is_trend = dif_crossed_zero
     bc_type = "趋势背驰" if is_trend else "盘整背驰"
     dif_note = "确认" if is_dif_beichi else "未确认"
+    zs_note = " | 两笔间有中枢" if zs_between else ""
 
     if last_bi["direction"] == "up":
         price_new_extreme = last_bi["end_price"] >= prev_same_dir["end_price"] * 0.98
@@ -479,6 +480,7 @@ def _beichi_for_pair(last_bi, prev_same_dir, df_with_macd, zhongshu_list):
             "desc": (
                 f"{bc_type} | 面积比={area_ratio:.2f} DIF峰值比={dif_ratio:.2f}"
                 f"({dif_note}) | DIF{'回抽' if dif_crossed_zero else '未回'}零轴"
+                f"{zs_note}"
             ),
         }
 
@@ -498,6 +500,7 @@ def _beichi_for_pair(last_bi, prev_same_dir, df_with_macd, zhongshu_list):
         "desc": (
             f"{bc_type} | 面积比={area_ratio:.2f} DIF峰值比={dif_ratio:.2f}"
             f"({dif_note}) | DIF{'回抽' if dif_crossed_zero else '未回'}零轴"
+            f"{zs_note}"
         ),
     }
 

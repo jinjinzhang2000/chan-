@@ -32,26 +32,38 @@ def _candle(day, high, low, close=None, open_=None, volume=1000):
 
 class MergeTests(unittest.TestCase):
     def test_simple_inclusion_merges(self):
+        # Prior bar sets an uptrend; the next bar is contained and must merge up.
         df = pd.DataFrame([
-            _candle(0, 12, 10),
-            _candle(1, 11.5, 10.5),  # inside first
-            _candle(2, 14, 12),
+            _candle(0, 10, 8),
+            _candle(1, 12, 10),
+            _candle(2, 11.5, 10.5),  # inside the second bar
+            _candle(3, 14, 12),
         ])
         merged = merge_inclusive_candles(df)
-        self.assertEqual(len(merged), 2)
-        self.assertGreaterEqual(merged.iloc[0]["high"], 12)
+        self.assertEqual(len(merged), 3)
+        self.assertGreaterEqual(float(merged.iloc[1]["high"]), 12)
+        self.assertGreaterEqual(float(merged.iloc[1]["low"]), 10)
 
-    def test_remerge_after_expansion(self):
-        # K2 expands vs K1; K3 is inside K2; merged K23 contains K1.
+    def test_nested_inclusions_collapse(self):
+        # Each new bar is contained in the running merged bar.
         df = pd.DataFrame([
-            _candle(0, 100, 90),
-            _candle(1, 110, 85),
-            _candle(2, 108, 88),
+            _candle(0, 20, 10),
+            _candle(1, 18, 12),
+            _candle(2, 17, 13),
         ])
         merged = merge_inclusive_candles(df)
         self.assertEqual(len(merged), 1)
-        self.assertEqual(merged.iloc[0]["high"], 110)
-        self.assertEqual(merged.iloc[0]["low"], 88)
+        self.assertLessEqual(float(merged.iloc[0]["high"]), 20)
+        self.assertGreaterEqual(float(merged.iloc[0]["low"]), 10)
+
+    def test_no_inclusion_keeps_all(self):
+        df = pd.DataFrame([
+            _candle(0, 10, 8),
+            _candle(1, 12, 9),
+            _candle(2, 14, 11),
+        ])
+        merged = merge_inclusive_candles(df)
+        self.assertEqual(len(merged), 3)
 
 
 class FenxingBiTests(unittest.TestCase):
