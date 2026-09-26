@@ -71,6 +71,11 @@ HKEX_DI_BASE_URL = _env(
     "HKEX_DI_BASE_URL",
     "https://di.hkex.com.hk/di/NSAllFormList.aspx",
 )
+# Webb-site Database mirror (CC-BY 4.0). Used when HKEX DI is unavailable.
+WEBB_SDI_URL = _env(
+    "WEBB_SDI_URL",
+    "https://webb-database.com/dbpub/sdilatest.asp",
+)
 HK_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

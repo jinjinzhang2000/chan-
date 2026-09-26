@@ -11,7 +11,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from config import (HKEX_DI_BASE_URL, HK_HEADERS, HK_MAX_RETRIES,
-                    HK_REQUEST_INTERVAL)
+                    HK_REQUEST_INTERVAL, WEBB_SDI_URL)
 
 
 FORM_TYPE_MAP = {
@@ -171,8 +171,14 @@ def _fetch_hkex_di_page(start_date: str, end_date: str,
             )
             resp.raise_for_status()
 
-            if "temporarily unavailable" in resp.text.lower() or "lblRecCount" not in resp.text:
-                print(f"  [警告] HKEX页面暂时不可用或返回异常，重试 {retry + 1}/{HK_MAX_RETRIES}")
+            if "temporarily unavailable" in resp.text.lower():
+                print(f"  [警告] HKEX页面暂时不可用，重试 {retry + 1}/{HK_MAX_RETRIES}")
+                if retry < min(1, HK_MAX_RETRIES - 1):
+                    time.sleep(2)
+                    continue
+                break
+            if "lblRecCount" not in resp.text:
+                print(f"  [警告] HKEX返回异常（无记录表），重试 {retry + 1}/{HK_MAX_RETRIES}")
                 time.sleep(2 ** retry)
                 continue
 
@@ -247,6 +253,133 @@ def _fetch_hkex_di_page(start_date: str, end_date: str,
     return [], 0
 
 
+def _parse_plain_number(text: str) -> float:
+    if not text:
+        return 0.0
+    cleaned = str(text).replace(",", "").replace(" ", "").strip()
+    if not cleaned or cleaned in {".", "-"}:
+        return 0.0
+    try:
+        return float(cleaned)
+    except ValueError:
+        return 0.0
+
+
+def _infer_webb_date(mmdd: str, today=None) -> datetime:
+    """Webb-site lists dates as MM-DD without a year."""
+    today = today or datetime.now()
+    parts = (mmdd or "").split("-")
+    if len(parts) != 2:
+        return today
+    try:
+        month, day = int(parts[0]), int(parts[1])
+        candidate = datetime(today.year, month, day)
+    except ValueError:
+        return today
+    if candidate.date() > (today + timedelta(days=1)).date():
+        candidate = datetime(today.year - 1, month, day)
+    return candidate
+
+
+def _webb_direction(reason: str, shares: float) -> str:
+    text = (reason or "").lower()
+    if any(key in text for key in ("bought", "purchased", "given", "received", "other inc", "exercised")):
+        return "增持"
+    if any(key in text for key in ("sold", "other dec", "delivered", "ceased")):
+        return "减持"
+    if shares < 0:
+        return "减持"
+    if shares > 0:
+        return "增持"
+    return "权益变动"
+
+
+def parse_webb_sdi_html(html: str, days: int = 3, today=None) -> list:
+    """
+    Parse Webb-site 'Latest director & CEO dealings' HTML into HK row dicts.
+    Data compiled by Webb-site.com, CC-BY 4.0.
+    """
+    today = today or datetime.now()
+    cutoff = today - timedelta(days=days)
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.find("table")
+    if not table:
+        return []
+
+    rows = []
+    for tr in table.find_all("tr")[1:]:
+        cells = tr.find_all("td")
+        if len(cells) < 12:
+            continue
+
+        date_text = cells[0].get_text(strip=True)
+        event_dt = _infer_webb_date(date_text, today=today)
+        if event_dt < cutoff.replace(hour=0, minute=0, second=0, microsecond=0):
+            continue
+
+        stock_code = "".join(ch for ch in cells[1].get_text(strip=True) if ch.isdigit()).zfill(5)
+        corp_name = cells[2].get_text(" ", strip=True)
+        person_name = cells[3].get_text(" ", strip=True)
+        reason = cells[4].get_text(" ", strip=True)
+        shares = _parse_plain_number(cells[6].get_text(strip=True))
+        onex = _parse_plain_number(cells[8].get_text(strip=True))
+        offex = _parse_plain_number(cells[9].get_text(strip=True))
+        avg_price = onex or offex
+        value = _parse_plain_number(cells[10].get_text(strip=True))
+        if value == 0 and shares and avg_price:
+            value = shares * avg_price
+        stake = _parse_plain_number(cells[11].get_text(strip=True))
+        form_id = ""
+        link = cells[0].find("a")
+        if link and link.get("href"):
+            match = re.search(r"[?&]r=(\d+)", link.get("href"))
+            if match:
+                form_id = match.group(1)
+
+        rows.append({
+            "FORM_SERIAL": f"WEBB{form_id}" if form_id else "",
+            "EVENT_DATE": event_dt.strftime("%Y-%m-%d"),
+            "CORP_NAME": corp_name,
+            "STOCK_CODE": stock_code,
+            "PERSON_NAME": person_name,
+            "REASON_CODE": "1101",
+            "REASON_TEXT": reason or "董事权益变动",
+            "FILER_TYPE": "董事/高管",
+            "SHARES_CHANGED": shares,
+            "AVG_PRICE": avg_price,
+            "TRADE_AMOUNT": round(value, 2),
+            "SHARES_INTERESTED_L": 0,
+            "SHARES_INTERESTED_S": 0,
+            "VOTING_PCT_L": stake,
+            "VOTING_PCT_S": 0.0,
+            "DIRECTION": _webb_direction(reason, shares),
+            "DATA_SOURCE": "Webb-site",
+        })
+    return rows
+
+
+def _fetch_webb_sdi(days: int = 3) -> pd.DataFrame:
+    """Fetch latest director/CEO dealings from the Webb-site Database mirror."""
+    try:
+        resp = requests.get(WEBB_SDI_URL, headers=HK_HEADERS, timeout=30)
+        resp.raise_for_status()
+        resp.encoding = resp.apparent_encoding or "utf-8"
+    except Exception as e:
+        print(f"  [错误] Webb-site 请求失败: {e}")
+        return pd.DataFrame()
+
+    if "Latest director" not in resp.text and "numtable" not in resp.text:
+        print("  [警告] Webb-site 页面结构异常")
+        return pd.DataFrame()
+
+    rows = parse_webb_sdi_html(resp.text, days=days)
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["EVENT_DATE"] = pd.to_datetime(df["EVENT_DATE"], errors="coerce")
+    return df
+
+
 def fetch_hk_insider_changes(days: int = 3) -> pd.DataFrame:
     """
     抓取港股权益披露数据（董事+大股东）
@@ -262,8 +395,10 @@ def fetch_hk_insider_changes(days: int = 3) -> pd.DataFrame:
 
     rows, total = _fetch_hkex_di_page(start_str, end_str, page=1)
     if total == 0 and not rows:
-        print("  ✅ 获取 0 条港股权益披露记录")
-        return pd.DataFrame()
+        print("  ↻ HKEX 无数据，改用 Webb-site Database（董事/CEO 买卖，CC-BY 4.0）")
+        df = _fetch_webb_sdi(days=days)
+        print(f"  ✅ 获取 {len(df)} 条港股权益披露记录（Webb-site）")
+        return df
 
     print(f"  共 {total or '?'} 条记录，第1页已获取 {len(rows)} 条")
 
@@ -290,6 +425,7 @@ def fetch_hk_insider_changes(days: int = 3) -> pd.DataFrame:
                      "SHARES_INTERESTED_L", "SHARES_INTERESTED_S",
                      "VOTING_PCT_L", "VOTING_PCT_S"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["DATA_SOURCE"] = "HKEX"
 
-    print(f"  ✅ 获取 {len(df)} 条港股权益披露记录")
+    print(f"  ✅ 获取 {len(df)} 条港股权益披露记录（HKEX）")
     return df

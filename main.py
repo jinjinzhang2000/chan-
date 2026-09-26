@@ -147,8 +147,8 @@ def main():
     if not args.no_hk:
         print_section(
             "🇭🇰 港股权益披露", hk_scored,
-            ["STOCK_CODE", "CORP_NAME", "PERSON_NAME", "FILER_TYPE", "REASON_TEXT",
-             "TRADE_AMOUNT", "VOTING_PCT_L", "EVENT_DATE", "SCORE"],
+            ["STOCK_CODE", "CORP_NAME", "PERSON_NAME", "FILER_TYPE", "DIRECTION",
+             "REASON_TEXT", "TRADE_AMOUNT", "VOTING_PCT_L", "EVENT_DATE", "SCORE"],
             args.min_score,
         )
 

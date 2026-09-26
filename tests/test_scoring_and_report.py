@@ -4,7 +4,13 @@ from datetime import datetime
 import pandas as pd
 from bs4 import BeautifulSoup
 
-from fetcher_hk import extract_stock_code, _parse_position_value, _parse_pct_value, _parse_price
+from fetcher_hk import (
+    extract_stock_code,
+    parse_webb_sdi_html,
+    _parse_position_value,
+    _parse_pct_value,
+    _parse_price,
+)
 from notifier import build_html_report, _build_shareholder_table, _build_executive_table
 from scorer import _as_percent, score_shareholder_changes
 from scorer_hk import _normalize_hk_code
@@ -101,6 +107,50 @@ class HkHelperTests(unittest.TestCase):
         self.assertEqual(_parse_position_value("11,067,400(L)")["L"], 11067400)
         self.assertAlmostEqual(_parse_pct_value("7.91(L)2.1(S)")["S"], 2.1)
         self.assertAlmostEqual(_parse_price("HKD 20.0900"), 20.09)
+
+    def test_parse_webb_sdi_html(self):
+        html = """
+        <table class="numtable">
+        <tr><th>date</th><th>code</th><th>stock</th><th>name</th><th>reason</th>
+        <th>LS</th><th>shares</th><th>curr</th><th>onex</th><th>offex</th>
+        <th>value</th><th>stake</th><th>chg</th></tr>
+        <tr>
+          <td><a href="sdicap.asp?r=354614">09-25</a></td>
+          <td>1104</td><td>APAC Resources Limited</td>
+          <td>Lee, Seng Hui 李成輝</td>
+          <td>Bought Purchased shares</td>
+          <td>L</td><td>220,000</td><td>HKD</td><td>2.136</td><td></td>
+          <td>470,008</td><td>50.17</td><td>0.01</td>
+        </tr>
+        <tr>
+          <td>09-24</td>
+          <td>1929</td><td>Chow Tai Fook</td>
+          <td>Cheng, Henry</td>
+          <td>Sold Completed sale</td>
+          <td>L</td><td>-43,500</td><td>HKD</td><td>0.850</td><td></td>
+          <td>-36,975</td><td>1.13</td><td>-0.01</td>
+        </tr>
+        <tr>
+          <td>01-02</td>
+          <td>0001</td><td>Old Co</td>
+          <td>Someone</td>
+          <td>Bought Purchased shares</td>
+          <td>L</td><td>1</td><td>HKD</td><td>1</td><td></td>
+          <td>1</td><td>1</td><td>0</td>
+        </tr>
+        </table>
+        """
+        today = datetime(2026, 9, 26)
+        rows = parse_webb_sdi_html(html, days=3, today=today)
+        self.assertEqual(len(rows), 2)
+        buy = rows[0]
+        self.assertEqual(buy["STOCK_CODE"], "01104")
+        self.assertEqual(buy["DIRECTION"], "增持")
+        self.assertEqual(buy["FORM_SERIAL"], "WEBB354614")
+        self.assertAlmostEqual(buy["TRADE_AMOUNT"], 470008)
+        self.assertEqual(buy["DATA_SOURCE"], "Webb-site")
+        self.assertEqual(rows[1]["DIRECTION"], "减持")
+        self.assertEqual(rows[1]["STOCK_CODE"], "01929")
 
 
 class ImportSmokeTests(unittest.TestCase):

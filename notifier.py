@@ -45,7 +45,7 @@ tr.portfolio:hover {{ background: #ffe8e8; }}
 <h1>A股+港股内部交易监控日报 - {date}</h1>
 {content}
 <div class="summary">
-<p>数据来源：东方财富 / 港交所权益披露 | 生成时间：{timestamp}</p>
+<p>数据来源：东方财富 / 港交所权益披露 / Webb-site Database | 生成时间：{timestamp}</p>
 <p>★ 标记为持仓股票 | 评分范围：0-130（持仓股额外+30分）</p>
 </div>
 </div>
@@ -237,7 +237,8 @@ def _build_hk_insider_table(df: pd.DataFrame) -> str:
         tr_cls = ' class="portfolio"' if is_p else ""
         tag = ' <span class="portfolio-tag">★持仓</span>' if is_p else ""
         filer = r.get("FILER_TYPE", "")
-        direction_cls = "buy" if "董事" in str(filer) else ""
+        direction = str(r.get("DIRECTION", ""))
+        direction_cls = "buy" if direction == "增持" or (not direction and "董事" in str(filer)) else "sell" if direction == "减持" else ""
         code = r.get("STOCK_CODE", "")
         corp_label = f"{code} " if code else ""
         rows.append(f"""<tr{tr_cls}>
@@ -275,7 +276,12 @@ def build_html_report(shareholder_df: pd.DataFrame, executive_df: pd.DataFrame,
     sections.append(_build_incentive_table(incentive_df))
 
     if hk_insider_df is not None and not hk_insider_df.empty:
-        sections.append(f"<h2>五、港股权益披露（{len(hk_insider_df)} 条）</h2>")
+        src = ""
+        if "DATA_SOURCE" in hk_insider_df.columns:
+            sources = sorted({str(s) for s in hk_insider_df["DATA_SOURCE"].dropna().unique() if s})
+            if sources:
+                src = f"，来源：{' / '.join(sources)}"
+        sections.append(f"<h2>五、港股权益披露（{len(hk_insider_df)} 条{src}）</h2>")
         sections.append(_build_hk_insider_table(hk_insider_df))
 
     return HTML_TEMPLATE.format(
