@@ -24,6 +24,15 @@ from scorer import (score_buybacks, score_equity_incentives,
 from scorer_hk import score_hk_insider_changes
 
 
+def _safe_call(label: str, fn, *args, **kwargs):
+    """Run a fetch/score step without letting one failure abort the report."""
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:
+        print(f"  [错误] {label}失败: {exc}")
+        return pd.DataFrame()
+
+
 def print_section(title: str, df: pd.DataFrame, columns: list, min_score: int):
     """终端打印一个板块的筛选结果"""
     filtered = df[df["SCORE"] >= min_score] if not df.empty else df
@@ -75,27 +84,27 @@ def main():
     ei_scored = pd.DataFrame()
 
     if not args.hk_only:
-        sh_df = fetch_shareholder_changes(days=args.days)
-        ex_df = fetch_executive_changes(days=args.days)
-        bb_df = fetch_buybacks(days=max(args.days, 30))  # 回购至少30天
-        ei_df = fetch_equity_incentives(days=max(args.days, 30))
+        sh_df = _safe_call("大股东增减持", fetch_shareholder_changes, days=args.days)
+        ex_df = _safe_call("高管增减持", fetch_executive_changes, days=args.days)
+        bb_df = _safe_call("股票回购", fetch_buybacks, days=max(args.days, 30))
+        ei_df = _safe_call("股权激励", fetch_equity_incentives, days=max(args.days, 30))
 
         # 2. A股评分
         print("\n📈 正在计算A股综合评分...")
-        sh_scored = score_shareholder_changes(sh_df)
-        ex_scored = score_executive_changes(ex_df)
-        bb_scored = score_buybacks(bb_df)
-        ei_scored = score_equity_incentives(ei_df)
+        sh_scored = _safe_call("大股东评分", score_shareholder_changes, sh_df)
+        ex_scored = _safe_call("高管评分", score_executive_changes, ex_df)
+        bb_scored = _safe_call("回购评分", score_buybacks, bb_df)
+        ei_scored = _safe_call("激励评分", score_equity_incentives, ei_df)
 
     # 3. 抓取港股数据
     hk_scored = pd.DataFrame()
 
     if not args.no_hk:
         print()
-        hk_df = fetch_hk_insider_changes(days=args.days)
+        hk_df = _safe_call("港股权益披露", fetch_hk_insider_changes, days=args.days)
         if not hk_df.empty:
             print("\n📈 正在计算港股综合评分...")
-            hk_scored = score_hk_insider_changes(hk_df)
+            hk_scored = _safe_call("港股评分", score_hk_insider_changes, hk_df)
 
     # 4. 筛选
     sh_filtered = sh_scored[sh_scored["SCORE"] >= args.min_score] if not sh_scored.empty else sh_scored
@@ -138,7 +147,7 @@ def main():
     if not args.no_hk:
         print_section(
             "🇭🇰 港股权益披露", hk_scored,
-            ["CORP_NAME", "PERSON_NAME", "FILER_TYPE", "REASON_TEXT",
+            ["STOCK_CODE", "CORP_NAME", "PERSON_NAME", "FILER_TYPE", "REASON_TEXT",
              "TRADE_AMOUNT", "VOTING_PCT_L", "EVENT_DATE", "SCORE"],
             args.min_score,
         )

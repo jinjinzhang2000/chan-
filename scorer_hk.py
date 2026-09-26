@@ -10,46 +10,68 @@
 - 方向加分（成为大股东等）：最高10分
 """
 import os
-import re
 
 import pandas as pd
 
 from config import PORTFOLIO_BONUS, PORTFOLIO_FILE
 
 
-def load_hk_portfolio() -> set:
-    """加载港股持仓代码集合（从portfolio.txt中读取HK:开头的行）"""
+def _normalize_hk_code(token: str) -> str:
+    token = (token or "").strip().upper()
+    if token.startswith("HK:"):
+        token = token[3:]
+    if token.endswith(".HK"):
+        token = token[:-3]
+    token = token.lstrip("HK")
+    digits = "".join(ch for ch in token if ch.isdigit())
+    return digits.zfill(5) if digits else ""
+
+
+def load_hk_portfolio() -> tuple:
+    """加载港股持仓：返回 (codes, name_tokens)。"""
     if not os.path.exists(PORTFOLIO_FILE):
-        return set()
+        return set(), set()
     codes = set()
+    names = set()
     with open(PORTFOLIO_FILE, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            if line and not line.startswith("#"):
-                token = line.split()[0]
-                if token.upper().startswith("HK:"):
-                    # HK:00700 -> 00700
-                    code = token[3:]
-                    codes.add(code)
-    return codes
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            token = parts[0]
+            code = _normalize_hk_code(token)
+            looks_hk = (
+                token.upper().startswith("HK")
+                or token.upper().endswith(".HK")
+                or bool(code)
+            )
+            if looks_hk and code:
+                codes.add(code)
+            if len(parts) > 1:
+                names.add(" ".join(parts[1:]).lower())
+    return codes, names
 
 
 def _apply_hk_portfolio_bonus(df: pd.DataFrame) -> pd.DataFrame:
-    """给港股持仓股票加分并标记（通过公司名匹配）"""
-    hk_codes = load_hk_portfolio()
-    if not hk_codes or df.empty:
-        if not df.empty:
-            df["IS_PORTFOLIO"] = False
+    """给港股持仓股票加分并标记（代码优先，公司名为辅）"""
+    hk_codes, hk_names = load_hk_portfolio()
+    if df.empty:
+        return df
+    if not hk_codes and not hk_names:
+        df["IS_PORTFOLIO"] = False
         return df
 
-    # 港股权益披露数据中没有直接的股票代码列
-    # 通过CORP_NAME匹配（用户需要在portfolio.txt中配置公司名）
-    # 或者用HK_PORTFOLIO_NAMES进行辅助匹配
     df["IS_PORTFOLIO"] = False
 
-    # 尝试通过STOCK_CODE列匹配（如果后续添加了此列）
-    if "STOCK_CODE" in df.columns:
-        df["IS_PORTFOLIO"] = df["STOCK_CODE"].isin(hk_codes)
+    if "STOCK_CODE" in df.columns and hk_codes:
+        codes = df["STOCK_CODE"].fillna("").astype(str).map(_normalize_hk_code)
+        df["IS_PORTFOLIO"] = codes.isin(hk_codes)
+
+    if hk_names and "CORP_NAME" in df.columns:
+        corp = df["CORP_NAME"].fillna("").str.lower()
+        name_hit = corp.apply(lambda text: any(name in text for name in hk_names if name))
+        df["IS_PORTFOLIO"] = df["IS_PORTFOLIO"] | name_hit
 
     df.loc[df["IS_PORTFOLIO"], "SCORE"] = (
         df.loc[df["IS_PORTFOLIO"], "SCORE"] + PORTFOLIO_BONUS

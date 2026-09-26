@@ -1,0 +1,10 @@
+# Copy to portfolio.txt (gitignored) and list holdings, one per line.
+# First token is the code; anything after is an optional name used for HK matching.
+#
+# A-share: 6-digit code
+# 600988 赤峰黄金
+# 002352 顺丰控股
+#
+# Hong Kong: HK: prefix or .HK suffix
+# HK:00700 腾讯
+# 09979.HK 绿城管理

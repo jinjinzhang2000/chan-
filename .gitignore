@@ -1,7 +1,8 @@
-# Sensitive config (contains email credentials)
-config.py
+# Local secrets / machine-specific overrides
+.env
+config.local.py
 
-# Portfolio
+# Portfolio (may contain personal holdings)
 portfolio.txt
 
 # Reports
@@ -11,7 +12,9 @@ reports/
 __pycache__/
 *.pyc
 *.pyo
-.env
+.pytest_cache/
+.venv/
+venv/
 
 # OS
 .DS_Store

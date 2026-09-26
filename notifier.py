@@ -54,8 +54,19 @@ tr.portfolio:hover {{ background: #ffe8e8; }}
 """
 
 
+def _is_missing(val) -> bool:
+    if val is None:
+        return True
+    try:
+        return bool(pd.isna(val))
+    except (TypeError, ValueError):
+        return False
+
+
 def _format_amount(val) -> str:
     """格式化金额显示"""
+    if _is_missing(val):
+        return "-"
     try:
         val = float(val)
     except (TypeError, ValueError):
@@ -67,6 +78,15 @@ def _format_amount(val) -> str:
         return f"{val/1e4:.2f}万"
     else:
         return f"{val:.0f}"
+
+
+def _format_pct(val, digits: int = 4) -> str:
+    if _is_missing(val):
+        return "-"
+    try:
+        return f"{float(val):.{digits}f}%"
+    except (TypeError, ValueError):
+        return "-"
 
 
 def _score_class(score) -> str:
@@ -96,7 +116,7 @@ def _build_shareholder_table(df: pd.DataFrame) -> str:
 <td>{r.get('HOLDER_NAME','')}</td>
 <td class="{direction_cls}">{r.get('DIRECTION','')}</td>
 <td>{_format_amount(r.get('TRADE_AMOUNT'))}</td>
-<td>{r.get('CHANGE_RATE', 0):.4f}%</td>
+<td>{_format_pct(r.get('CHANGE_RATE'))}</td>
 <td>{str(r.get('END_DATE',''))[:10]}</td>
 <td class="score {_score_class(r.get('SCORE'))}">{r.get('SCORE','')}</td>
 </tr>""")
@@ -115,8 +135,12 @@ def _build_executive_table(df: pd.DataFrame) -> str:
         tr_cls = ' class="portfolio"' if is_p else ""
         tag = ' <span class="portfolio-tag">★持仓</span>' if is_p else ""
         amt = r.get("CHANGE_AMOUNT", 0)
-        direction_cls = "buy" if (amt and float(amt) > 0) else "sell"
-        direction = "增持" if (amt and float(amt) > 0) else "减持"
+        try:
+            amt_val = float(amt) if not _is_missing(amt) else 0.0
+        except (TypeError, ValueError):
+            amt_val = 0.0
+        direction_cls = "buy" if amt_val > 0 else "sell"
+        direction = "增持" if amt_val > 0 else "减持"
         rows.append(f"""<tr{tr_cls}>
 <td>{r.get('SECURITY_CODE','')}{tag}</td>
 <td>{r.get('SECURITY_NAME','')}</td>
@@ -165,7 +189,10 @@ def _build_incentive_table(df: pd.DataFrame) -> str:
         tr_cls = ' class="portfolio"' if is_p else ""
         tag = ' <span class="portfolio-tag">★持仓</span>' if is_p else ""
         shares = r.get("INCENTIVE_SHARES", 0)
-        shares_str = f"{float(shares):.0f}万股" if pd.notna(shares) else "-"
+        try:
+            shares_str = f"{float(shares):.0f}万股" if not _is_missing(shares) else "-"
+        except (TypeError, ValueError):
+            shares_str = "-"
         rows.append(f"""<tr{tr_cls}>
 <td>{r.get('SECURITY_CODE','')}{tag}</td>
 <td>{r.get('SECURITY_NAME_ABBR','')}</td>
@@ -184,6 +211,8 @@ def _build_incentive_table(df: pd.DataFrame) -> str:
 
 def _format_amount_hkd(val) -> str:
     """格式化港币金额显示"""
+    if _is_missing(val):
+        return "-"
     try:
         val = float(val)
     except (TypeError, ValueError):
@@ -209,13 +238,15 @@ def _build_hk_insider_table(df: pd.DataFrame) -> str:
         tag = ' <span class="portfolio-tag">★持仓</span>' if is_p else ""
         filer = r.get("FILER_TYPE", "")
         direction_cls = "buy" if "董事" in str(filer) else ""
+        code = r.get("STOCK_CODE", "")
+        corp_label = f"{code} " if code else ""
         rows.append(f"""<tr{tr_cls}>
-<td>{r.get('CORP_NAME','')}{tag}</td>
+<td>{corp_label}{r.get('CORP_NAME','')}{tag}</td>
 <td>{r.get('PERSON_NAME','')}</td>
 <td>{filer}</td>
 <td>{r.get('REASON_TEXT','')}</td>
 <td>{_format_amount_hkd(r.get('TRADE_AMOUNT'))}</td>
-<td>{r.get('VOTING_PCT_L', 0):.2f}%</td>
+<td>{_format_pct(r.get('VOTING_PCT_L'), digits=2)}</td>
 <td>{str(r.get('EVENT_DATE',''))[:10]}</td>
 <td class="score {_score_class(r.get('SCORE'))}">{r.get('SCORE','')}</td>
 </tr>""")

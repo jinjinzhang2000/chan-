@@ -2,63 +2,97 @@
 缠论分析引擎 (Chan Theory / Entanglement Theory Engine)
 
 核心模块：
-1. K线合并 (Inclusive Candle Merging)
+1. K线合并 (Inclusive Candle Merging) — 含合并后回溯再合并
 2. 分型识别 (Fractal/Fenxing Detection) - 顶分型/底分型
 3. 笔划分 (Stroke/Bi Identification)
 4. 线段划分 (Segment/XianDuan Identification)
-5. 中枢识别 (Hub/ZhongShu Detection)
+5. 中枢识别 (Hub/ZhongShu Detection) - 基于笔构建
 6. 背驰检测 (Divergence/BeiChi Detection)
 7. 买卖点判断 (Buy/Sell Point Detection)
 """
 
-import numpy as np
 import pandas as pd
+
+
+def _normalize_dates(df: pd.DataFrame) -> pd.DataFrame:
+    """Make date column timezone-naive timestamps for reliable comparisons."""
+    if df.empty or "date" not in df.columns:
+        return df
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce")
+    if getattr(out["date"].dt, "tz", None) is not None:
+        out["date"] = out["date"].dt.tz_localize(None)
+    return out
+
+
+def _as_ts(value):
+    ts = pd.to_datetime(value, errors="coerce")
+    if getattr(ts, "tz", None) is not None:
+        ts = ts.tz_localize(None)
+    return ts
 
 
 # ─────────────────────────────────────────────
 # 1. K线合并 (Inclusive Candle Merging)
 # ─────────────────────────────────────────────
 
+def _is_inclusive(a: dict, b: dict) -> bool:
+    return (
+        (a["high"] >= b["high"] and a["low"] <= b["low"])
+        or (b["high"] >= a["high"] and b["low"] <= a["low"])
+    )
+
+
+def _pair_direction(prev: dict, first: dict) -> int:
+    """Direction of the pair relative to the candle before it: 1=up, -1=down."""
+    if first["high"] > prev["high"]:
+        return 1
+    if first["low"] < prev["low"]:
+        return -1
+    if first["high"] >= prev["high"]:
+        return 1
+    return -1
+
+
+def _merge_pair(a: dict, b: dict, direction: int) -> dict:
+    out = b.copy()
+    if direction == 1:
+        out["high"] = max(a["high"], b["high"])
+        out["low"] = max(a["low"], b["low"])
+    else:
+        out["high"] = min(a["high"], b["high"])
+        out["low"] = min(a["low"], b["low"])
+    if "open" in a:
+        out["open"] = a["open"]
+    if "close" in b:
+        out["close"] = b["close"]
+    out["volume"] = max(a.get("volume", 0) or 0, b.get("volume", 0) or 0)
+    out["date"] = b["date"]
+    return out
+
+
 def merge_inclusive_candles(df: pd.DataFrame) -> pd.DataFrame:
     """
     处理包含关系的K线合并。
     输入 df 需有 columns: date, open, high, low, close, volume
     输出: 合并后的K线 DataFrame
+
+    合并后若结果与前一根仍包含，继续向前合并（标准缠论处理）。
     """
-    if df.empty or len(df) < 3:
+    if df.empty or len(df) < 2:
         return df.copy()
 
-    merged = []
-    rows = df.to_dict("records")
-    merged.append(rows[0].copy())
+    rows = [r.copy() for r in df.to_dict("records")]
+    merged = [rows[0]]
 
-    # 确定初始方向: 1=上升, -1=下降
-    direction = 1 if rows[1]["high"] >= rows[0]["high"] else -1
-
-    for i in range(1, len(rows)):
-        cur = rows[i]
-        prev = merged[-1]
-
-        # 检查包含关系: prev包含cur 或 cur包含prev
-        if (prev["high"] >= cur["high"] and prev["low"] <= cur["low"]) or \
-           (cur["high"] >= prev["high"] and cur["low"] <= prev["low"]):
-            # 合并
-            if direction == 1:  # 上升趋势: 取高的high和高的low
-                merged[-1]["high"] = max(prev["high"], cur["high"])
-                merged[-1]["low"] = max(prev["low"], cur["low"])
-            else:  # 下降趋势: 取低的high和低的low
-                merged[-1]["high"] = min(prev["high"], cur["high"])
-                merged[-1]["low"] = min(prev["low"], cur["low"])
-            # 保留较大成交量和最新日期
-            merged[-1]["volume"] = max(prev.get("volume", 0), cur.get("volume", 0))
-            merged[-1]["date"] = cur["date"]
-        else:
-            # 不包含, 更新方向
-            if cur["high"] > prev["high"]:
-                direction = 1
-            elif cur["low"] < prev["low"]:
-                direction = -1
-            merged.append(cur.copy())
+    for cur in rows[1:]:
+        merged.append(cur.copy())
+        while len(merged) >= 2 and _is_inclusive(merged[-2], merged[-1]):
+            if len(merged) >= 3:
+                direction = _pair_direction(merged[-3], merged[-2])
+            else:
+                direction = 1 if merged[-1]["high"] >= merged[-2]["high"] else -1
+            merged[-2:] = [_merge_pair(merged[-2], merged[-1], direction)]
 
     return pd.DataFrame(merged)
 
@@ -70,8 +104,7 @@ def merge_inclusive_candles(df: pd.DataFrame) -> pd.DataFrame:
 def detect_fenxing(merged_df: pd.DataFrame) -> list:
     """
     识别顶分型和底分型。
-    顶分型: 中间K线的high最高
-    底分型: 中间K线的low最低
+    合并后无包含关系时，顶分型 = 中间K线 high 最高；底分型 = 中间K线 low 最低。
     返回: list of dict {index, date, type: 'top'/'bottom', price}
     """
     fenxing_list = []
@@ -82,16 +115,19 @@ def detect_fenxing(merged_df: pd.DataFrame) -> list:
     for i in range(1, len(rows) - 1):
         prev, cur, nxt = rows[i - 1], rows[i], rows[i + 1]
 
-        if cur["high"] > prev["high"] and cur["high"] > nxt["high"] and \
-           cur["low"] > prev["low"] and cur["low"] > nxt["low"]:
+        is_top = cur["high"] > prev["high"] and cur["high"] > nxt["high"]
+        is_bottom = cur["low"] < prev["low"] and cur["low"] < nxt["low"]
+
+        # After inclusive merge, a true top also has higher lows; require both
+        # to avoid marking a K that only expanded one side.
+        if is_top and cur["low"] >= prev["low"] and cur["low"] >= nxt["low"]:
             fenxing_list.append({
                 "index": i,
                 "date": cur["date"],
                 "type": "top",
                 "price": cur["high"],
             })
-        elif cur["low"] < prev["low"] and cur["low"] < nxt["low"] and \
-             cur["high"] < prev["high"] and cur["high"] < nxt["high"]:
+        elif is_bottom and cur["high"] <= prev["high"] and cur["high"] <= nxt["high"]:
             fenxing_list.append({
                 "index": i,
                 "date": cur["date"],
@@ -106,98 +142,190 @@ def detect_fenxing(merged_df: pd.DataFrame) -> list:
 # 3. 笔划分 (Stroke/Bi Identification)
 # ─────────────────────────────────────────────
 
-def identify_bi(fenxing_list: list, merged_df: pd.DataFrame) -> list:
+_MIN_FX_GAP = 4  # 两分型之间至少 1 根独立K线 → 合并K线索引差 >= 4
+
+
+def identify_bi(fenxing_list: list, merged_df: pd.DataFrame = None) -> list:
     """
     从分型序列中划分笔。
     规则:
     - 顶分型与底分型交替出现
-    - 相邻两个分型之间至少有1根独立K线（即分型之间>=5根原始K线，合并后>=3根）
-    返回: list of dict {start_date, end_date, start_price, end_price, direction: 'up'/'down'}
+    - 相邻两个分型之间至少有1根独立K线（合并后索引差>=4）
+    - 向上笔终点价必须高于起点，向下笔相反
+    返回: list of dict {start_date, end_date, start_price, end_price, direction}
     """
     if len(fenxing_list) < 2:
         return []
 
-    # 过滤分型: 保证交替出现且间隔足够
     valid = [fenxing_list[0]]
-    for i in range(1, len(fenxing_list)):
-        fx = fenxing_list[i]
+    for fx in fenxing_list[1:]:
         last = valid[-1]
 
-        # 必须交替
         if fx["type"] == last["type"]:
-            # 同类型: 取更极端的
             if fx["type"] == "top" and fx["price"] > last["price"]:
                 valid[-1] = fx
             elif fx["type"] == "bottom" and fx["price"] < last["price"]:
                 valid[-1] = fx
             continue
 
-        # 间隔检查: 至少间隔4根合并K线
-        if abs(fx["index"] - last["index"]) < 4:
+        if abs(fx["index"] - last["index"]) < _MIN_FX_GAP:
+            # Opposite but too close: keep looking; do not replace last
+            # unless this opposite is so close it invalidates nothing.
             continue
 
         valid.append(fx)
 
-    # 从有效分型构建笔
+    # After replacements, drop any remaining same-type neighbors (shouldn't
+    # happen) and re-check gaps against the previous opposite.
+    cleaned = []
+    for fx in valid:
+        if not cleaned:
+            cleaned.append(fx)
+            continue
+        if fx["type"] == cleaned[-1]["type"]:
+            if fx["type"] == "top" and fx["price"] > cleaned[-1]["price"]:
+                cleaned[-1] = fx
+            elif fx["type"] == "bottom" and fx["price"] < cleaned[-1]["price"]:
+                cleaned[-1] = fx
+            continue
+        if abs(fx["index"] - cleaned[-1]["index"]) < _MIN_FX_GAP:
+            continue
+        cleaned.append(fx)
+    valid = cleaned
+
     bi_list = []
     for i in range(1, len(valid)):
         prev_fx = valid[i - 1]
         cur_fx = valid[i]
         direction = "up" if cur_fx["type"] == "top" else "down"
+        start_price = prev_fx["price"]
+        end_price = cur_fx["price"]
+        if direction == "up" and end_price <= start_price:
+            continue
+        if direction == "down" and end_price >= start_price:
+            continue
+        change_pct = (
+            (end_price - start_price) / start_price * 100 if start_price else 0.0
+        )
         bi_list.append({
             "start_date": prev_fx["date"],
             "end_date": cur_fx["date"],
-            "start_price": prev_fx["price"],
-            "end_price": cur_fx["price"],
+            "start_price": start_price,
+            "end_price": end_price,
             "direction": direction,
+            "start_index": prev_fx["index"],
+            "end_index": cur_fx["index"],
+            "change_pct": change_pct,
         })
 
     return bi_list
 
 
 # ─────────────────────────────────────────────
-# 4. 中枢识别 (Hub/ZhongShu Detection)
+# 4. 线段划分 (Segment/XianDuan Identification)
+# ─────────────────────────────────────────────
+
+def identify_xianduan(bi_list: list) -> list:
+    """
+    简化特征序列法划分线段。
+
+    确认条件：连续三笔（同向-反向-同向）且第三笔极值超过第一笔，
+    构成该方向线段。线段延续直到反向三笔同样被确认。
+    """
+    if len(bi_list) < 3:
+        return []
+
+    segments = []
+    n = len(bi_list)
+    i = 0
+    while i <= n - 3:
+        d = bi_list[i]["direction"]
+        if bi_list[i + 1]["direction"] == d or bi_list[i + 2]["direction"] != d:
+            i += 1
+            continue
+
+        if d == "up":
+            confirmed = bi_list[i + 2]["end_price"] > bi_list[i]["end_price"]
+        else:
+            confirmed = bi_list[i + 2]["end_price"] < bi_list[i]["end_price"]
+
+        if not confirmed:
+            i += 1
+            continue
+
+        end = i + 2
+        for k in range(end + 1, n - 2):
+            rd = bi_list[k]["direction"]
+            if rd == d:
+                continue
+            if bi_list[k + 1]["direction"] != d or bi_list[k + 2]["direction"] == d:
+                continue
+            if rd == "down":
+                rev_ok = bi_list[k + 2]["end_price"] < bi_list[k]["end_price"]
+            else:
+                rev_ok = bi_list[k + 2]["end_price"] > bi_list[k]["end_price"]
+            if rev_ok:
+                end = k - 1
+                break
+        else:
+            end = n - 1
+
+        if end < i + 2:
+            end = i + 2
+
+        start_price = bi_list[i]["start_price"]
+        end_price = bi_list[end]["end_price"]
+        segments.append({
+            "start_date": bi_list[i]["start_date"],
+            "end_date": bi_list[end]["end_date"],
+            "start_price": start_price,
+            "end_price": end_price,
+            "direction": d,
+            "bi_count": end - i + 1,
+            "start_bi": i,
+            "end_bi": end,
+        })
+        i = end + 1
+
+    return segments
+
+
+# ─────────────────────────────────────────────
+# 5. 中枢识别 (Hub/ZhongShu Detection)
 # ─────────────────────────────────────────────
 
 def detect_zhongshu(bi_list: list) -> list:
     """
     识别中枢。中枢由至少3笔的重叠区间构成。
-    中枢区间 = 连续笔的高低点重叠区域
-    返回: list of dict {start_date, end_date, high, low, bi_count, level}
+    中枢区间 = 连续三笔高低点重叠区域（后续笔只决定是否延伸，不改区间）。
+    返回: list of dict {start_date, end_date, high, low, bi_count}
     """
     if len(bi_list) < 3:
         return []
 
     zhongshu_list = []
-
     i = 0
     while i < len(bi_list) - 2:
-        # 取3笔, 找重叠区间
         b1, b2, b3 = bi_list[i], bi_list[i + 1], bi_list[i + 2]
-
-        # 每笔的高低范围
         ranges = []
-        for b in [b1, b2, b3]:
-            h = max(b["start_price"], b["end_price"])
-            l = min(b["start_price"], b["end_price"])
-            ranges.append((l, h))
+        for b in (b1, b2, b3):
+            ranges.append((
+                min(b["start_price"], b["end_price"]),
+                max(b["start_price"], b["end_price"]),
+            ))
 
-        # 重叠区间
         zs_low = max(r[0] for r in ranges)
         zs_high = min(r[1] for r in ranges)
 
         if zs_low < zs_high:
-            # 有效中枢, 尝试扩展
             bi_count = 3
             zs_start = b1["start_date"]
             zs_end = b3["end_date"]
-
             j = i + 3
             while j < len(bi_list):
                 bj = bi_list[j]
                 bj_high = max(bj["start_price"], bj["end_price"])
                 bj_low = min(bj["start_price"], bj["end_price"])
-                # 检查是否与中枢有重叠
                 if bj_low < zs_high and bj_high > zs_low:
                     bi_count += 1
                     zs_end = bj["end_date"]
@@ -212,7 +340,7 @@ def detect_zhongshu(bi_list: list) -> list:
                 "low": zs_low,
                 "bi_count": bi_count,
             })
-            i = j  # 跳到中枢之后
+            i = j
         else:
             i += 1
 
@@ -220,7 +348,7 @@ def detect_zhongshu(bi_list: list) -> list:
 
 
 # ─────────────────────────────────────────────
-# 5. 趋势与背驰检测 (Trend & Divergence)
+# 6. 趋势与背驰检测 (Trend & Divergence)
 # ─────────────────────────────────────────────
 
 def detect_trend(zhongshu_list: list) -> str:
@@ -233,15 +361,22 @@ def detect_trend(zhongshu_list: list) -> str:
     if len(zhongshu_list) < 2:
         return "consolidation"
 
-    last_two = zhongshu_list[-2:]
-    zs1, zs2 = last_two[0], last_two[1]
+    zs1, zs2 = zhongshu_list[-2], zhongshu_list[-1]
 
     if zs2["low"] > zs1["high"]:
         return "uptrend"
-    elif zs2["high"] < zs1["low"]:
+    if zs2["high"] < zs1["low"]:
         return "downtrend"
-    else:
-        return "consolidation"
+    return "consolidation"
+
+
+def _slice_by_bi(df: pd.DataFrame, bi: dict) -> pd.DataFrame:
+    start = _as_ts(bi["start_date"])
+    end = _as_ts(bi["end_date"])
+    dates = pd.to_datetime(df["date"], errors="coerce")
+    if getattr(dates.dt, "tz", None) is not None:
+        dates = dates.dt.tz_localize(None)
+    return df.loc[(dates >= start) & (dates <= end)]
 
 
 def _macd_dif_area(bi, df):
@@ -250,150 +385,162 @@ def _macd_dif_area(bi, df):
     缠论原著用黄白线（DIF/DEA）围成的面积比较力度，
     MACD柱 = 2*(DIF-DEA) 正是这个面积的度量。
     """
-    mask = (df["date"] >= bi["start_date"]) & (df["date"] <= bi["end_date"])
-    segment = df.loc[mask, "macd"]
+    if df.empty or "macd" not in df.columns:
+        return 0
+    segment = _slice_by_bi(df, bi)["macd"]
     if segment.empty:
         return 0
-    return abs(segment.sum())
+    return float(abs(segment.sum()))
 
 
 def _dif_peak_in_bi(bi, df):
     """取一笔区间内DIF的极值（上涨笔取最大值，下跌笔取最小值的绝对值）"""
-    mask = (df["date"] >= bi["start_date"]) & (df["date"] <= bi["end_date"])
-    segment = df.loc[mask, "dif"]
+    if df.empty or "dif" not in df.columns:
+        return 0
+    segment = _slice_by_bi(df, bi)["dif"]
     if segment.empty:
         return 0
     if bi["direction"] == "up":
-        return segment.max()
-    else:
-        return abs(segment.min())
+        return float(segment.max())
+    return float(abs(segment.min()))
 
 
 def _dif_cross_zero_between(bi1, bi2, df):
     """
     检查两笔之间DIF是否回抽零轴。
-    缠论：两次同向走势之间DIF回拉零轴 → 说明经历了一个完整的中枢震荡，
-    之后的背驰属于"趋势背驰"（更强的信号）。
-    DIF未回零轴 → "盘整背驰"（较弱的信号）。
+    缠论：两次同向走势之间DIF回拉零轴 → 趋势背驰；
+    DIF未回零轴 → 盘整背驰。
     """
-    mask = (df["date"] >= bi1["end_date"]) & (df["date"] <= bi2["start_date"])
-    segment = df.loc[mask, "dif"]
+    if df.empty or "dif" not in df.columns:
+        return False
+    start = _as_ts(bi1["end_date"])
+    end = _as_ts(bi2["start_date"])
+    dates = pd.to_datetime(df["date"], errors="coerce")
+    if getattr(dates.dt, "tz", None) is not None:
+        dates = dates.dt.tz_localize(None)
+    segment = df.loc[(dates >= start) & (dates <= end), "dif"]
     if segment.empty:
         return False
     if bi1["direction"] == "up":
-        # 上涨趋势中间，DIF应该回到零轴以下
-        return segment.min() <= 0
-    else:
-        # 下跌趋势中间，DIF应该回到零轴以上
-        return segment.max() >= 0
+        return float(segment.min()) <= 0
+    return float(segment.max()) >= 0
+
+
+def _zhongshu_between(bi1, bi2, zhongshu_list) -> bool:
+    if not zhongshu_list:
+        return False
+    start = _as_ts(bi1["end_date"])
+    end = _as_ts(bi2["start_date"])
+    for zs in zhongshu_list:
+        zs_start = _as_ts(zs["start_date"])
+        zs_end = _as_ts(zs["end_date"])
+        if zs_end > start and zs_start < end:
+            return True
+    return False
+
+
+def _beichi_for_pair(last_bi, prev_same_dir, df_with_macd, zhongshu_list):
+    area_last = _macd_dif_area(last_bi, df_with_macd)
+    area_prev = _macd_dif_area(prev_same_dir, df_with_macd)
+    if area_prev == 0:
+        return None
+
+    area_ratio = area_last / area_prev
+    dif_peak_last = _dif_peak_in_bi(last_bi, df_with_macd)
+    dif_peak_prev = _dif_peak_in_bi(prev_same_dir, df_with_macd)
+    dif_ratio = dif_peak_last / dif_peak_prev if dif_peak_prev != 0 else 1.0
+    dif_crossed_zero = _dif_cross_zero_between(prev_same_dir, last_bi, df_with_macd)
+    zs_between = _zhongshu_between(prev_same_dir, last_bi, zhongshu_list or [])
+
+    is_area_beichi = area_ratio < 0.9
+    is_dif_beichi = dif_ratio < 0.9
+    if not is_area_beichi:
+        return None
+
+    # 有中枢间隔且DIF回抽零轴 → 趋势背驰；否则盘整背驰
+    is_trend = dif_crossed_zero or zs_between
+    bc_type = "趋势背驰" if is_trend else "盘整背驰"
+    dif_note = "确认" if is_dif_beichi else "未确认"
+
+    if last_bi["direction"] == "up":
+        price_new_extreme = last_bi["end_price"] >= prev_same_dir["end_price"] * 0.98
+        if not price_new_extreme:
+            return None
+        return {
+            "type": "top_beichi",
+            "subtype": "trend" if is_trend else "consolidation",
+            "date": last_bi["end_date"],
+            "price": last_bi["end_price"],
+            "area_ratio": area_ratio,
+            "dif_ratio": dif_ratio,
+            "strength_ratio": area_ratio,
+            "dif_crossed_zero": dif_crossed_zero,
+            "dif_confirmed": is_dif_beichi,
+            "desc": (
+                f"{bc_type} | 面积比={area_ratio:.2f} DIF峰值比={dif_ratio:.2f}"
+                f"({dif_note}) | DIF{'回抽' if dif_crossed_zero else '未回'}零轴"
+            ),
+        }
+
+    price_new_extreme = last_bi["end_price"] <= prev_same_dir["end_price"] * 1.02
+    if not price_new_extreme:
+        return None
+    return {
+        "type": "bottom_beichi",
+        "subtype": "trend" if is_trend else "consolidation",
+        "date": last_bi["end_date"],
+        "price": last_bi["end_price"],
+        "area_ratio": area_ratio,
+        "dif_ratio": dif_ratio,
+        "strength_ratio": area_ratio,
+        "dif_crossed_zero": dif_crossed_zero,
+        "dif_confirmed": is_dif_beichi,
+        "desc": (
+            f"{bc_type} | 面积比={area_ratio:.2f} DIF峰值比={dif_ratio:.2f}"
+            f"({dif_note}) | DIF{'回抽' if dif_crossed_zero else '未回'}零轴"
+        ),
+    }
 
 
 def detect_beichi(bi_list: list, df_with_macd: pd.DataFrame,
                   zhongshu_list: list = None) -> list:
     """
-    按缠论原著的背驰检测。
-
-    核心逻辑（缠中说禅原文）：
-    1. 比较两段同向走势的MACD黄白线面积（DIF与DEA围成的面积）
-    2. 价格创新高/低，但MACD面积缩小 → 背驰
-    3. 两段之间DIF回抽零轴 → 趋势背驰（强信号，至少有两个中枢）
-    4. 两段之间DIF未回零轴 → 盘整背驰（弱信号，一个中枢内的波动）
-    5. DIF极值也用于辅助判断：DIF峰值降低也是背驰特征
-
-    返回: list of dict
+    按缠论原著的背驰检测。扫描每一笔与其前一同向笔，而不仅是最后一笔，
+    这样第一类买卖点不会在后续回调出现时消失，第二类买卖点才有依据。
     """
     beichi_list = []
-    if len(bi_list) < 3 or df_with_macd.empty:
+    if len(bi_list) < 3 or df_with_macd is None or df_with_macd.empty:
         return beichi_list
 
     if "macd" not in df_with_macd.columns:
         df_with_macd = compute_macd(df_with_macd)
 
-    last_bi = bi_list[-1]
-
-    # 找前一个同向笔（隔一笔，即倒数第3笔起找）
-    prev_same_dir = None
-    prev_idx = None
-    for j in range(len(bi_list) - 3, -1, -1):
-        if bi_list[j]["direction"] == last_bi["direction"]:
-            prev_same_dir = bi_list[j]
-            prev_idx = j
-            break
-
-    if prev_same_dir is None:
-        return beichi_list
-
-    # ── 面积比较（核心） ──
-    area_last = _macd_dif_area(last_bi, df_with_macd)
-    area_prev = _macd_dif_area(prev_same_dir, df_with_macd)
-
-    if area_prev == 0:
-        return beichi_list
-
-    area_ratio = area_last / area_prev
-
-    # ── DIF极值比较（辅助） ──
-    dif_peak_last = _dif_peak_in_bi(last_bi, df_with_macd)
-    dif_peak_prev = _dif_peak_in_bi(prev_same_dir, df_with_macd)
-    dif_ratio = dif_peak_last / dif_peak_prev if dif_peak_prev != 0 else 1.0
-
-    # ── 零轴回抽判断：区分趋势背驰和盘整背驰 ──
-    dif_crossed_zero = _dif_cross_zero_between(prev_same_dir, last_bi, df_with_macd)
-
-    # ── 背驰判断 ──
-    # 面积缩小 = 背驰的必要条件
-    is_area_beichi = area_ratio < 0.9
-
-    # DIF极值也缩小 = 更强确认
-    is_dif_beichi = dif_ratio < 0.9
-
-    if last_bi["direction"] == "up":
-        # 价格创新高（或接近），面积缩小
-        price_new_extreme = last_bi["end_price"] >= prev_same_dir["end_price"] * 0.98
-        if price_new_extreme and is_area_beichi:
-            bc_type = "趋势背驰" if dif_crossed_zero else "盘整背驰"
-            beichi_list.append({
-                "type": "top_beichi",
-                "subtype": "trend" if dif_crossed_zero else "consolidation",
-                "date": last_bi["end_date"],
-                "price": last_bi["end_price"],
-                "area_ratio": area_ratio,
-                "dif_ratio": dif_ratio,
-                "strength_ratio": area_ratio,  # 兼容旧字段
-                "dif_crossed_zero": dif_crossed_zero,
-                "desc": f"{bc_type} | 面积比={area_ratio:.2f} DIF峰值比={dif_ratio:.2f}"
-                        f" | DIF{'回抽' if dif_crossed_zero else '未回'}零轴",
-            })
-
-    elif last_bi["direction"] == "down":
-        price_new_extreme = last_bi["end_price"] <= prev_same_dir["end_price"] * 1.02
-        if price_new_extreme and is_area_beichi:
-            bc_type = "趋势背驰" if dif_crossed_zero else "盘整背驰"
-            beichi_list.append({
-                "type": "bottom_beichi",
-                "subtype": "trend" if dif_crossed_zero else "consolidation",
-                "date": last_bi["end_date"],
-                "price": last_bi["end_price"],
-                "area_ratio": area_ratio,
-                "dif_ratio": dif_ratio,
-                "strength_ratio": area_ratio,  # 兼容旧字段
-                "dif_crossed_zero": dif_crossed_zero,
-                "desc": f"{bc_type} | 面积比={area_ratio:.2f} DIF峰值比={dif_ratio:.2f}"
-                        f" | DIF{'回抽' if dif_crossed_zero else '未回'}零轴",
-            })
+    for i in range(2, len(bi_list)):
+        last_bi = bi_list[i]
+        prev_same_dir = None
+        for j in range(i - 2, -1, -1):
+            if bi_list[j]["direction"] == last_bi["direction"]:
+                prev_same_dir = bi_list[j]
+                break
+        if prev_same_dir is None:
+            continue
+        item = _beichi_for_pair(last_bi, prev_same_dir, df_with_macd, zhongshu_list)
+        if item:
+            beichi_list.append(item)
 
     return beichi_list
 
 
 # ─────────────────────────────────────────────
-# 6. MACD 计算
+# 7. MACD 计算
 # ─────────────────────────────────────────────
 
 def compute_macd(df: pd.DataFrame, fast=12, slow=26, signal=9) -> pd.DataFrame:
     """计算MACD指标"""
     df = df.copy()
-    ema_fast = df["close"].ewm(span=fast, adjust=False).mean()
-    ema_slow = df["close"].ewm(span=slow, adjust=False).mean()
+    close = pd.to_numeric(df["close"], errors="coerce")
+    ema_fast = close.ewm(span=fast, adjust=False).mean()
+    ema_slow = close.ewm(span=slow, adjust=False).mean()
     df["dif"] = ema_fast - ema_slow
     df["dea"] = df["dif"].ewm(span=signal, adjust=False).mean()
     df["macd"] = 2 * (df["dif"] - df["dea"])
@@ -401,7 +548,7 @@ def compute_macd(df: pd.DataFrame, fast=12, slow=26, signal=9) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────
-# 7. 买卖点识别 (Buy/Sell Point Detection)
+# 8. 买卖点识别 (Buy/Sell Point Detection)
 # ─────────────────────────────────────────────
 
 def detect_buy_sell_points(bi_list: list, zhongshu_list: list,
@@ -410,20 +557,9 @@ def detect_buy_sell_points(bi_list: list, zhongshu_list: list,
     """
     按缠论原著识别三类买卖点，结合MACD确认。
 
-    缠论买卖点体系（缠中说禅原文）：
-
-    第一类买点: 下跌趋势中，最后一段背驰（MACD面积缩小），形成底分型
-      - 必须有背驰作为前提（MACD力度递减）
-      - 趋势背驰（DIF回零轴后）比盘整背驰更可靠
-    第一类卖点: 上涨趋势中，最后一段背驰，形成顶分型
-
+    第一类买点: 下跌趋势中最后一段背驰
     第二类买点: 第一类买点后的第一次回调不创新低
-      - MACD确认：此时MACD柱应在零轴附近或缩短，DIF回抽零轴
-    第二类卖点: 第一类卖点后的第一次反弹不创新高
-
-    第三类买点: 中枢形成后，向上离开中枢的回调不跌回中枢内
-      - MACD确认：回调时MACD柱缩短或金叉
-    第三类卖点: 中枢形成后，向下离开中枢的反弹不回到中枢内
+    第三类买点: 向上离开中枢后的回调不跌回中枢
     """
     signals = []
 
@@ -432,24 +568,30 @@ def detect_buy_sell_points(bi_list: list, zhongshu_list: list,
 
     last_bi = bi_list[-1]
 
-    # ── 信号新鲜度 ──
     def signal_status(signal_price, is_buy):
-        if current_price is None:
+        if current_price is None or signal_price is None:
+            return "unknown"
+        try:
+            signal_price = float(signal_price)
+            current = float(current_price)
+        except (TypeError, ValueError):
             return "unknown"
         if is_buy:
-            if current_price > signal_price * 1.05:
+            if current > signal_price * 1.05:
                 return "historical"
         else:
-            if current_price < signal_price * 0.95:
+            if current < signal_price * 0.95:
                 return "historical"
         return "active"
 
-    # ── MACD辅助函数 ──
     def macd_at_bi_end(bi):
-        """取笔结束时的MACD状态"""
         if df_macd is None or df_macd.empty:
             return {}
-        mask = df_macd["date"] <= bi["end_date"]
+        end = _as_ts(bi["end_date"])
+        dates = pd.to_datetime(df_macd["date"], errors="coerce")
+        if getattr(dates.dt, "tz", None) is not None:
+            dates = dates.dt.tz_localize(None)
+        mask = dates <= end
         if mask.sum() == 0:
             return {}
         row = df_macd.loc[mask].iloc[-1]
@@ -459,38 +601,37 @@ def detect_buy_sell_points(bi_list: list, zhongshu_list: list,
             "macd": row.get("macd", 0),
         }
 
-    def macd_golden_cross_near(bi):
-        """检查笔结束附近是否出现MACD金叉（DIF上穿DEA）"""
+    def _cross_near(bi, golden: bool) -> bool:
         if df_macd is None or df_macd.empty:
             return False
-        mask = (df_macd["date"] >= bi["start_date"]) & (df_macd["date"] <= bi["end_date"])
-        seg = df_macd.loc[mask]
+        seg = _slice_by_bi(df_macd, bi)
         if len(seg) < 2:
             return False
-        # 检查最后几根K线是否出现金叉
         for i in range(max(0, len(seg) - 3), len(seg)):
-            if i > 0 and seg.iloc[i]["dif"] > seg.iloc[i]["dea"] and \
-               seg.iloc[i - 1]["dif"] <= seg.iloc[i - 1]["dea"]:
+            if i == 0:
+                continue
+            dif_now, dea_now = seg.iloc[i]["dif"], seg.iloc[i]["dea"]
+            dif_prev, dea_prev = seg.iloc[i - 1]["dif"], seg.iloc[i - 1]["dea"]
+            if golden and dif_now > dea_now and dif_prev <= dea_prev:
+                return True
+            if not golden and dif_now < dea_now and dif_prev >= dea_prev:
                 return True
         return False
+
+    def macd_golden_cross_near(bi):
+        return _cross_near(bi, True)
 
     def macd_dead_cross_near(bi):
-        """检查笔结束附近是否出现MACD死叉（DIF下穿DEA）"""
-        if df_macd is None or df_macd.empty:
-            return False
-        mask = (df_macd["date"] >= bi["start_date"]) & (df_macd["date"] <= bi["end_date"])
-        seg = df_macd.loc[mask]
-        if len(seg) < 2:
-            return False
-        for i in range(max(0, len(seg) - 3), len(seg)):
-            if i > 0 and seg.iloc[i]["dif"] < seg.iloc[i]["dea"] and \
-               seg.iloc[i - 1]["dif"] >= seg.iloc[i - 1]["dea"]:
-                return True
-        return False
+        return _cross_near(bi, False)
 
-    # ── 当前走势状态（未完成的笔）──
     forming_info = None
-    if last_bi["direction"] == "down" and current_price > last_bi["end_price"]:
+    if current_price is not None:
+        try:
+            current_price = float(current_price)
+        except (TypeError, ValueError):
+            current_price = None
+
+    if current_price is not None and last_bi["direction"] == "down" and current_price > last_bi["end_price"]:
         forming_info = {
             "type": "forming_up",
             "name": "上涨笔形成中",
@@ -501,7 +642,7 @@ def detect_buy_sell_points(bi_list: list, zhongshu_list: list,
                     f" (+{(current_price - last_bi['end_price']) / last_bi['end_price'] * 100:.1f}%)"
                     f"，等待顶分型确认",
         }
-    elif last_bi["direction"] == "up" and current_price < last_bi["end_price"]:
+    elif current_price is not None and last_bi["direction"] == "up" and current_price < last_bi["end_price"]:
         forming_info = {
             "type": "forming_down",
             "name": "下跌笔形成中",
@@ -513,10 +654,7 @@ def detect_buy_sell_points(bi_list: list, zhongshu_list: list,
                     f"，等待底分型确认",
         }
 
-    # ══════════════════════════════════════════
-    # 第一类买卖点: 背驰 + 分型确认
-    # ══════════════════════════════════════════
-    for bc in beichi_list:
+    for bc in beichi_list or []:
         is_buy = bc["type"] == "bottom_beichi"
         status = signal_status(bc["price"], is_buy)
         bc_subtype = bc.get("subtype", "unknown")
@@ -543,20 +681,16 @@ def detect_buy_sell_points(bi_list: list, zhongshu_list: list,
                 "desc": f"顶背驰 | {bc_desc}",
             })
 
-    # ══════════════════════════════════════════
-    # 第二类买卖点: 1买/1卖后第一次回调/反弹不创新低/高
-    # MACD确认: 回调时MACD柱缩短，DIF靠近零轴
-    # ══════════════════════════════════════════
+    prior_1b = [s for s in signals if s["type"] == "1B"]
+    prior_1s = [s for s in signals if s["type"] == "1S"]
+
+    # 第二类：必须先有第一类，且出现在第一类之后的回调/反弹上
     if len(bi_list) >= 4:
-        if last_bi["direction"] == "down":
-            prev_down = None
-            for j in range(len(bi_list) - 3, -1, -1):
-                if bi_list[j]["direction"] == "down":
-                    prev_down = bi_list[j]
-                    break
-            if prev_down and last_bi["end_price"] > prev_down["end_price"]:
+        last_end = _as_ts(last_bi["end_date"])
+        if last_bi["direction"] == "down" and prior_1b:
+            prev_1b = prior_1b[-1]
+            if _as_ts(prev_1b["date"]) < last_end and last_bi["end_price"] > prev_1b["price"]:
                 status = signal_status(last_bi["end_price"], True)
-                # MACD确认: 回调结束时DIF回抽零轴附近
                 macd_info = macd_at_bi_end(last_bi)
                 dif_val = macd_info.get("dif", 0)
                 has_golden = macd_golden_cross_near(last_bi)
@@ -570,17 +704,15 @@ def detect_buy_sell_points(bi_list: list, zhongshu_list: list,
                     "price": last_bi["end_price"],
                     "strength": 0,
                     "status": status,
-                    "desc": f"回调不创新低: {last_bi['end_price']:.2f} > 前低{prev_down['end_price']:.2f}"
-                            f" | {macd_detail}",
+                    "desc": (
+                        f"1买后回调不创新低: {last_bi['end_price']:.2f} > "
+                        f"1买{prev_1b['price']:.2f} | {macd_detail}"
+                    ),
                 })
 
-        if last_bi["direction"] == "up":
-            prev_up = None
-            for j in range(len(bi_list) - 3, -1, -1):
-                if bi_list[j]["direction"] == "up":
-                    prev_up = bi_list[j]
-                    break
-            if prev_up and last_bi["end_price"] < prev_up["end_price"]:
+        if last_bi["direction"] == "up" and prior_1s:
+            prev_1s = prior_1s[-1]
+            if _as_ts(prev_1s["date"]) < last_end and last_bi["end_price"] < prev_1s["price"]:
                 status = signal_status(last_bi["end_price"], False)
                 macd_info = macd_at_bi_end(last_bi)
                 dif_val = macd_info.get("dif", 0)
@@ -595,21 +727,24 @@ def detect_buy_sell_points(bi_list: list, zhongshu_list: list,
                     "price": last_bi["end_price"],
                     "strength": 0,
                     "status": status,
-                    "desc": f"反弹不创新高: {last_bi['end_price']:.2f} < 前高{prev_up['end_price']:.2f}"
-                            f" | {macd_detail}",
+                    "desc": (
+                        f"1卖后反弹不创新高: {last_bi['end_price']:.2f} < "
+                        f"1卖{prev_1s['price']:.2f} | {macd_detail}"
+                    ),
                 })
 
-    # ══════════════════════════════════════════
-    # 第三类买卖点: 离开中枢后回踩不回中枢
-    # MACD确认: 回踩时MACD柱缩短，说明回踩力度弱
-    # ══════════════════════════════════════════
+    # 第三类：前一笔必须先离开中枢，当前反向笔不回到中枢
     if zhongshu_list and len(bi_list) >= 2:
         last_zs = zhongshu_list[-1]
+        prev_bi = bi_list[-2]
 
         if last_bi["direction"] == "down":
-            bi_low = last_bi["end_price"]
-            # 严格3买：回调低点在中枢上沿之上
-            if bi_low > last_zs["high"]:
+            left_up = (
+                prev_bi["direction"] == "up"
+                and prev_bi["end_price"] > last_zs["high"]
+            )
+            if left_up and last_bi["end_price"] > last_zs["high"]:
+                bi_low = last_bi["end_price"]
                 status = signal_status(bi_low, True)
                 macd_info = macd_at_bi_end(last_bi)
                 has_golden = macd_golden_cross_near(last_bi)
@@ -623,14 +758,19 @@ def detect_buy_sell_points(bi_list: list, zhongshu_list: list,
                     "price": bi_low,
                     "strength": 0,
                     "status": status,
-                    "desc": f"回调{bi_low:.2f}未进中枢[{last_zs['low']:.2f}-{last_zs['high']:.2f}]"
-                            f" | {macd_detail}",
+                    "desc": (
+                        f"离开后回调{bi_low:.2f}未进中枢"
+                        f"[{last_zs['low']:.2f}-{last_zs['high']:.2f}] | {macd_detail}"
+                    ),
                 })
 
         if last_bi["direction"] == "up":
-            bi_high = last_bi["end_price"]
-            # 严格3卖：反弹高点在中枢下沿之下
-            if bi_high < last_zs["low"]:
+            left_down = (
+                prev_bi["direction"] == "down"
+                and prev_bi["end_price"] < last_zs["low"]
+            )
+            if left_down and last_bi["end_price"] < last_zs["low"]:
+                bi_high = last_bi["end_price"]
                 status = signal_status(bi_high, False)
                 macd_info = macd_at_bi_end(last_bi)
                 has_dead = macd_dead_cross_near(last_bi)
@@ -644,15 +784,17 @@ def detect_buy_sell_points(bi_list: list, zhongshu_list: list,
                     "price": bi_high,
                     "strength": 0,
                     "status": status,
-                    "desc": f"反弹{bi_high:.2f}未回中枢[{last_zs['low']:.2f}-{last_zs['high']:.2f}]"
-                            f" | {macd_detail}",
+                    "desc": (
+                        f"离开后反弹{bi_high:.2f}未回中枢"
+                        f"[{last_zs['low']:.2f}-{last_zs['high']:.2f}] | {macd_detail}"
+                    ),
                 })
 
     return signals, forming_info
 
 
 # ─────────────────────────────────────────────
-# 8. 完整分析流水线
+# 9. 完整分析流水线
 # ─────────────────────────────────────────────
 
 def full_chan_analysis(df: pd.DataFrame) -> dict:
@@ -661,32 +803,29 @@ def full_chan_analysis(df: pd.DataFrame) -> dict:
     输入: 标准OHLCV DataFrame (date, open, high, low, close, volume)
     输出: dict with all analysis results
     """
-    if df.empty or len(df) < 10:
+    if df is None or df.empty or len(df) < 10:
         return {"error": "数据不足，至少需要10根K线"}
 
-    # Step 1: MACD
+    required = {"date", "open", "high", "low", "close"}
+    missing = required - set(df.columns)
+    if missing:
+        return {"error": f"缺少必要列: {', '.join(sorted(missing))}"}
+
+    df = _normalize_dates(df)
+    df = df.dropna(subset=["date", "open", "high", "low", "close"])
+    if len(df) < 10:
+        return {"error": "数据不足，至少需要10根K线"}
+
     df_macd = compute_macd(df)
-
-    # Step 2: K线合并
     merged = merge_inclusive_candles(df_macd)
-
-    # Step 3: 分型识别
     fenxing = detect_fenxing(merged)
-
-    # Step 4: 笔划分
     bi_list = identify_bi(fenxing, merged)
-
-    # Step 5: 中枢识别
+    xianduan = identify_xianduan(bi_list)
     zhongshu = detect_zhongshu(bi_list)
-
-    # Step 6: 趋势判断
-    trend = detect_trend(zhongshu)
-
-    # Step 7: 背驰检测 (传入中枢列表用于趋势/盘整背驰区分)
+    zhongshu_xd = detect_zhongshu(xianduan) if len(xianduan) >= 3 else []
+    trend = detect_trend(zhongshu_xd) if len(zhongshu_xd) >= 2 else detect_trend(zhongshu)
     beichi = detect_beichi(bi_list, df_macd, zhongshu)
-
-    # Step 8: 买卖点 (传入df_macd用于MACD金叉/死叉确认)
-    current_price = df["close"].iloc[-1]
+    current_price = float(df["close"].iloc[-1])
     latest_date = df["date"].iloc[-1]
     signals, forming_info = detect_buy_sell_points(
         bi_list, zhongshu, beichi, current_price, latest_date, df_macd)
@@ -697,6 +836,8 @@ def full_chan_analysis(df: pd.DataFrame) -> dict:
         "fenxing_count": len(fenxing),
         "bi_list": bi_list,
         "bi_count": len(bi_list),
+        "xianduan": xianduan,
+        "xianduan_count": len(xianduan),
         "zhongshu": zhongshu,
         "zhongshu_count": len(zhongshu),
         "trend": trend,
@@ -706,8 +847,8 @@ def full_chan_analysis(df: pd.DataFrame) -> dict:
         "current_price": current_price,
         "last_date": df["date"].iloc[-1],
         "macd_latest": {
-            "dif": df_macd["dif"].iloc[-1],
-            "dea": df_macd["dea"].iloc[-1],
-            "macd": df_macd["macd"].iloc[-1],
+            "dif": float(df_macd["dif"].iloc[-1]),
+            "dea": float(df_macd["dea"].iloc[-1]),
+            "macd": float(df_macd["macd"].iloc[-1]),
         },
     }
