@@ -14,6 +14,20 @@ import pandas as pd
 from config import PORTFOLIO_FILE, PORTFOLIO_BONUS
 
 
+def _as_percent(series: pd.Series) -> pd.Series:
+    """
+    Normalize CHANGE_RATE to percentage points.
+
+    East Money sometimes returns 0.02 (meaning 2%) and sometimes 2.0.
+    If every finite value is within [-1, 1], treat the column as a fraction.
+    """
+    rate = pd.to_numeric(series, errors="coerce").fillna(0).abs()
+    finite = rate[rate > 0]
+    if not finite.empty and float(finite.max()) <= 1.0:
+        return rate * 100
+    return rate
+
+
 def load_portfolio() -> set:
     """加载持仓股票代码集合"""
     if not os.path.exists(PORTFOLIO_FILE):
@@ -62,7 +76,7 @@ def score_shareholder_changes(df: pd.DataFrame) -> pd.DataFrame:
 
     # 2. 占总股本比例评分（最高40分）—— 不论增减持，大比例变动都重要
     if "CHANGE_RATE" in df.columns:
-        rate = df["CHANGE_RATE"].fillna(0).abs() * 100  # 转为百分比
+        rate = _as_percent(df["CHANGE_RATE"])
         scores += (rate >= 5).astype(int) * 40
         scores += ((rate >= 3) & (rate < 5)).astype(int) * 30
         scores += ((rate >= 1) & (rate < 3)).astype(int) * 20

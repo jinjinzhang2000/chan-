@@ -10,10 +10,14 @@ import requests
 
 from config import API_BASE_URL, HEADERS, PAGE_SIZE, REQUEST_TIMEOUT
 
+_session = requests.Session()
+_session.headers.update(HEADERS)
+_MAX_RETRIES = 3
+
 
 def _fetch_eastmoney(report_name: str, sort_columns: str, sort_types: str,
                      filter_expr: str = "", extra_params: dict = None) -> pd.DataFrame:
-    """通用东方财富API抓取函数，自动分页"""
+    """通用东方财富API抓取函数，自动分页，失败重试"""
     params = {
         "reportName": report_name,
         "columns": "ALL",
@@ -33,16 +37,24 @@ def _fetch_eastmoney(report_name: str, sort_columns: str, sort_types: str,
     page = 1
     while True:
         params["pageNumber"] = str(page)
-        try:
-            resp = requests.get(API_BASE_URL, params=params, headers=HEADERS,
-                                timeout=REQUEST_TIMEOUT)
-            resp.raise_for_status()
-            result = resp.json()
-        except Exception as e:
-            print(f"  [错误] 请求 {report_name} 第{page}页失败: {e}")
+        result = None
+        last_error = None
+        for retry in range(_MAX_RETRIES):
+            try:
+                resp = _session.get(API_BASE_URL, params=params, timeout=REQUEST_TIMEOUT)
+                resp.raise_for_status()
+                result = resp.json()
+                last_error = None
+                break
+            except Exception as e:
+                last_error = e
+                time.sleep(1.5 * (retry + 1))
+
+        if last_error is not None:
+            print(f"  [错误] 请求 {report_name} 第{page}页失败: {last_error}")
             break
 
-        if not result.get("success") or not result.get("result"):
+        if not result or not result.get("success") or not result.get("result"):
             break
 
         data = result["result"].get("data")
@@ -54,7 +66,7 @@ def _fetch_eastmoney(report_name: str, sort_columns: str, sort_types: str,
         if page >= total_pages:
             break
         page += 1
-        time.sleep(0.3)  # 避免请求过快
+        time.sleep(0.3)
 
     if not all_data:
         return pd.DataFrame()
@@ -64,7 +76,7 @@ def _fetch_eastmoney(report_name: str, sort_columns: str, sort_types: str,
 def _date_filter(field: str, days: int) -> str:
     """生成日期过滤表达式"""
     start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    return f'({field}>=\'{start}\')'
+    return f"({field}>='{start}')"
 
 
 def fetch_shareholder_changes(days: int = 3) -> pd.DataFrame:
@@ -87,7 +99,6 @@ def fetch_shareholder_changes(days: int = 3) -> pd.DataFrame:
         extra_params=extra,
     )
     if not df.empty:
-        # 计算交易金额（变动股数 * 成交均价）
         for col in ["CHANGE_NUM", "TRADE_AVERAGE_PRICE"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -142,7 +153,6 @@ def fetch_buybacks(days: int = 30) -> pd.DataFrame:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        # 映射进度代码
         progress_map = {
             "001": "董事会预案", "002": "股东大会通过", "003": "股东大会否决",
             "004": "实施中", "005": "停止实施", "006": "完成实施",

@@ -37,6 +37,51 @@ SYMBOLS = {
         "name": "恒生科技ETF (HSTECH Tracker)",
         "name_short": "恒科",
     },
+    "TME": {
+        "ticker": "TME",
+        "name": "腾讯音乐 (TME)",
+        "name_short": "腾讯音乐",
+    },
+    "SF": {
+        "ticker": "002352.SZ",
+        "name": "顺丰控股",
+        "name_short": "顺丰",
+    },
+    "GDX": {
+        "ticker": "GDX",
+        "name": "Gold Miners ETF",
+        "name_short": "GDX",
+    },
+    "TL": {
+        "ticker": "000630.SZ",
+        "name": "铜陵有色",
+        "name_short": "铜陵有色",
+    },
+    "GC": {
+        "ticker": "9979.HK",
+        "name": "绿城管理",
+        "name_short": "绿城",
+    },
+    "GAME": {
+        "ticker": "159869.SZ",
+        "name": "游戏ETF",
+        "name_short": "游戏ETF",
+    },
+    "LQ": {
+        "ticker": "688008.SS",
+        "name": "澜起科技",
+        "name_short": "澜起",
+    },
+    "CF": {
+        "ticker": "600988.SS",
+        "name": "赤峰黄金",
+        "name_short": "赤峰黄金",
+    },
+    "PW": {
+        "ticker": "002624.SZ",
+        "name": "完美世界",
+        "name_short": "完美世界",
+    },
 }
 
 # 多级别分析配置: (yfinance period, yfinance interval, label)
@@ -59,9 +104,13 @@ def fetch_ohlcv(ticker: str, period: str, interval: str) -> pd.DataFrame:
         if data.empty:
             return pd.DataFrame()
 
-        # yfinance >= 1.0 returns MultiIndex columns (Price, Ticker)
+        # yfinance >= 1.0 often returns MultiIndex columns (Price, Ticker)
         if isinstance(data.columns, pd.MultiIndex):
-            data = data.droplevel("Ticker", axis=1)
+            names = list(data.columns.names)
+            if "Ticker" in names:
+                data = data.droplevel("Ticker", axis=1)
+            elif data.columns.nlevels > 1:
+                data = data.droplevel(-1, axis=1)
 
         df = data.reset_index()
 
@@ -152,7 +201,11 @@ def print_analysis(symbol_key: str, cfg: dict, results: dict):
         print(f"\n  ─── {tf_label}级别 ───")
         print(f"  当前价: {result['current_price']:.2f} | 最新: {str(result['last_date'])[:16]}")
         print(f"  趋势: {trend_label(result['trend'])}")
-        print(f"  结构: {result['bi_count']}笔 | {result['fenxing_count']}分型 | {result['zhongshu_count']}中枢")
+        xd_count = result.get("xianduan_count", 0)
+        print(
+            f"  结构: {result['bi_count']}笔 | {xd_count}线段 | "
+            f"{result['fenxing_count']}分型 | {result['zhongshu_count']}中枢"
+        )
 
         # MACD状态
         m = result["macd_latest"]
@@ -284,8 +337,8 @@ def main():
     parser.add_argument("--once", action="store_true",
                         help="只分析一次，不循环")
     parser.add_argument("--symbols", nargs="+", default=["SIL", "HST"],
-                        choices=["SIL", "HST"],
-                        help="监控标的: SIL=白银, HST=恒科")
+                        choices=sorted(SYMBOLS.keys()),
+                        help="监控标的，默认 SIL HST。可选: " + ", ".join(sorted(SYMBOLS)))
     args = parser.parse_args()
 
     if args.once:
